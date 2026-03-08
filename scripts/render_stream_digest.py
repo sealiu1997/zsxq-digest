@@ -20,6 +20,7 @@ TRAILING_SOURCE_NAME_RE = re.compile(r"[-_｜|](新华网|凤凰网|新浪新闻
 TRAILING_ELLIPSIS_RE = re.compile(r"(\.\.\.|…|……)+$")
 SOURCE_NOISE = {"百度安全验证", "华尔街见闻", "本球消息"}
 QUESTION_HINTS = ("？", "?", "是否", "能否", "可行性", "怎么", "如何", "有没有", "意见", "建议", "问题", "请教")
+TITLE_AS_NEWS_LINE_RE = re.compile(r"^(?:旧闻\s*)?\d+(?:[\.、]|\s)")
 PRIVATE_AUTHOR_ALLOWLISTS = {
     "睡前消息的编辑们": {"豆农", "马督工", "小白", "子不语", "聿人", "曾勃", "月亮池塘", "弗朗茨波拿巴"}
 }
@@ -218,9 +219,9 @@ def candidate_content_lines(item: dict) -> List[str]:
         line = clean_text(line)
         if not line:
             continue
-        if line == title:
+        if line == title and not TITLE_AS_NEWS_LINE_RE.match(line):
             continue
-        if title and line.startswith(title) and len(line) <= len(title) + 3:
+        if title and line.startswith(title) and len(line) <= len(title) + 3 and not TITLE_AS_NEWS_LINE_RE.match(line):
             continue
         if line.startswith("#"):
             continue
