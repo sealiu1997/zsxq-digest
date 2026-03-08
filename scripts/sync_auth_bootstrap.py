@@ -3,6 +3,8 @@ import argparse
 import json
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -82,6 +84,63 @@ def call_qr_ready(args, page_url: Optional[str] = None, qr_image_url: Optional[s
     return run_json(cmd)
 
 
+def derive_json_list_url(ws_url: str) -> Optional[str]:
+    try:
+        parsed = urllib.parse.urlparse(ws_url)
+        if parsed.scheme not in ("ws", "wss") or not parsed.netloc:
+            return None
+        http_scheme = "https" if parsed.scheme == "wss" else "http"
+        return f"{http_scheme}://{parsed.netloc}/json/list"
+    except Exception:
+        return None
+
+
+def find_fresh_wechat_target(current_ws_url: str, expected_url: str = "") -> Optional[dict]:
+    json_list_url = derive_json_list_url(current_ws_url)
+    if not json_list_url:
+        return None
+    try:
+        with urllib.request.urlopen(json_list_url, timeout=5) as resp:
+            items = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(items, list):
+        return None
+
+    candidates = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ws_url = item.get("webSocketDebuggerUrl") or ""
+        page_url = item.get("url") or ""
+        if not ws_url or ws_url == current_ws_url:
+            continue
+        if "open.weixin.qq.com/connect/qrconnect" not in page_url:
+            continue
+        if expected_url and page_url != expected_url:
+            continue
+        candidates.append(item)
+
+    if candidates:
+        return candidates[0]
+    return None
+
+
+def open_fresh_login_target(zsxq_ws_url: str, login_url: str = "https://wx.zsxq.com/login") -> Optional[dict]:
+    json_list_url = derive_json_list_url(zsxq_ws_url)
+    if not json_list_url:
+        return None
+    base = json_list_url.rsplit("/json/list", 1)[0]
+    new_url = f"{base}/json/new?{login_url}"
+    req = urllib.request.Request(new_url, method="PUT")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Synchronize zsxq auth bootstrap state using browser CDP helper scripts")
     parser.add_argument("--state-file", required=True)
@@ -107,6 +166,57 @@ def main():
         if args.wechat_ws_url:
             probe_payload = run_json(["node", str(PROBE), "--ws-url", args.wechat_ws_url])
             actions.append({"step": "probe_wechat_qr", "result": probe_payload})
+
+            if probe_payload.get("status") == "QR_EXPIRED":
+                expected_iframe_url = (prepare_payload or {}).get("iframe_url", "") or probe_payload.get("url", "")
+                fresh_target = find_fresh_wechat_target(
+                    args.wechat_ws_url,
+                    expected_url=expected_iframe_url,
+                )
+                if fresh_target:
+                    retry_payload = run_json(["node", str(PROBE), "--ws-url", fresh_target.get("webSocketDebuggerUrl")])
+                    actions.append({
+                        "step": "probe_wechat_qr_fresh_target",
+                        "result": {
+                            "target_id": fresh_target.get("id"),
+                            "ws_url": fresh_target.get("webSocketDebuggerUrl"),
+                            "probe": retry_payload,
+                        },
+                    })
+                    if isinstance(retry_payload, dict) and retry_payload.get("status"):
+                        probe_payload = retry_payload
+
+                if probe_payload.get("status") == "QR_EXPIRED" and args.zsxq_ws_url:
+                    fresh_login = open_fresh_login_target(args.zsxq_ws_url)
+                    if fresh_login and fresh_login.get("webSocketDebuggerUrl"):
+                        actions.append({
+                            "step": "open_fresh_login_target",
+                            "result": {
+                                "target_id": fresh_login.get("id"),
+                                "ws_url": fresh_login.get("webSocketDebuggerUrl"),
+                                "url": fresh_login.get("url"),
+                            },
+                        })
+                        fresh_prepare = run_json(["node", str(PREPARE), "--ws-url", fresh_login.get("webSocketDebuggerUrl")])
+                        actions.append({"step": "prepare_zsxq_fresh_target", "result": fresh_prepare})
+                        fresh_iframe_url = fresh_prepare.get("iframe_url", "") or expected_iframe_url
+                        discovered_wechat = find_fresh_wechat_target(
+                            fresh_login.get("webSocketDebuggerUrl"),
+                            expected_url=fresh_iframe_url,
+                        )
+                        if discovered_wechat and discovered_wechat.get("webSocketDebuggerUrl"):
+                            retry_payload = run_json(["node", str(PROBE), "--ws-url", discovered_wechat.get("webSocketDebuggerUrl")])
+                            actions.append({
+                                "step": "probe_wechat_qr_from_fresh_login_target",
+                                "result": {
+                                    "target_id": discovered_wechat.get("id"),
+                                    "ws_url": discovered_wechat.get("webSocketDebuggerUrl"),
+                                    "probe": retry_payload,
+                                },
+                            })
+                            if isinstance(retry_payload, dict) and retry_payload.get("status"):
+                                probe_payload = retry_payload
+
             status = probe_payload.get("status")
             if status == "QR_READY":
                 qr_state = call_qr_ready(args, page_url=probe_payload.get("url"), qr_image_url=probe_payload.get("qr_image_url"))
