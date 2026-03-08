@@ -1,0 +1,20 @@
+# Private runtime state (never publish)
+state/
+*.token.json
+*.session.json
+*.cursor.json
+*.cookies.json
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Packaging / local artifacts
+*.skill
+*.bak
+*.bak.*
+.DS_Store
+.tmp/
+tmp/
