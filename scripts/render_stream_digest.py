@@ -21,9 +21,7 @@ TRAILING_ELLIPSIS_RE = re.compile(r"(\.\.\.|…|……)+$")
 SOURCE_NOISE = {"百度安全验证", "华尔街见闻", "本球消息"}
 QUESTION_HINTS = ("？", "?", "是否", "能否", "可行性", "怎么", "如何", "有没有", "意见", "建议", "问题", "请教")
 TITLE_AS_NEWS_LINE_RE = re.compile(r"^(?:旧闻\s*)?\d+(?:[\.、]|\s)")
-PRIVATE_AUTHOR_ALLOWLISTS = {
-    "睡前消息的编辑们": {"豆农", "马督工", "小白", "子不语", "聿人", "曾勃", "月亮池塘", "弗朗茨波拿巴"}
-}
+GENERIC_GREETING_PREFIX_RE = re.compile(r"^(?:(?:[\u4e00-\u9fffA-Za-z0-9_·]{1,12})(?:你好|您好|老师好)|你好|您好|各位好|老师好|博主好|作者好|大家好|hi|hello)[，,！!：:\s]*", re.IGNORECASE)
 
 
 def load_json(path: Path):
@@ -124,22 +122,20 @@ def circle_date_span(items: List[dict]) -> str:
     return dates[0] if min(dates) == max(dates) else f"{min(dates)} ~ {max(dates)}"
 
 
+def should_use_private_news_list_mode(circle_name: str, requested: bool = False) -> bool:
+    _ = clean_text(circle_name)
+    return bool(requested)
+
+
 def circle_authors(items: List[dict], private_mode: bool = False) -> str:
     authors = []
     seen = set()
     candidates = items
-    circle_name = clean_text(items[0].get("circle_name")) if items else ""
 
     if private_mode:
-        allowlist = PRIVATE_AUTHOR_ALLOWLISTS.get(circle_name)
-        if allowlist:
-            filtered = [item for item in items if clean_text(item.get("author")) in allowlist]
-            if filtered:
-                candidates = filtered
-        else:
-            filtered = [item for item in items if not item.get("is_question")]
-            if filtered:
-                candidates = filtered
+        filtered = [item for item in items if not item.get("is_question")]
+        if filtered:
+            candidates = filtered
 
     for item in candidates:
         author = clean_text(item.get("author"))
@@ -231,6 +227,21 @@ def candidate_content_lines(item: dict) -> List[str]:
     return kept or lines
 
 
+def line_looks_like_headline(line: str) -> bool:
+    line = clean_text(line)
+    if not line:
+        return False
+    if URL_LINE_RE.match(line):
+        return False
+    if len(line) > 60:
+        return False
+    if any(mark in line for mark in ("？", "?", "请教", "怎么", "如何", "有没有")):
+        return False
+    punctuation_hits = sum(line.count(ch) for ch in ("_", "|", "｜", "：", ":", "-"))
+    digit_prefix = bool(re.match(r"^(?:旧闻\s*)?\d+(?:[\.、]|\s)", line))
+    return punctuation_hits >= 1 or digit_prefix or len(line) <= 28
+
+
 def looks_like_news_list(item: dict) -> bool:
     if item.get("is_answer"):
         return False
@@ -238,53 +249,24 @@ def looks_like_news_list(item: dict) -> bool:
     if len(lines) < 3:
         return False
 
-    short_headlines = 0
-    source_style = 0
-    geopolitical_terms = 0
-    for line in lines[:12]:
-        line = clean_text(line)
-        if not line:
-            continue
-        if len(line) <= 42:
-            short_headlines += 1
-        if "_" in line or "|" in line:
-            source_style += 1
-        if any(word in line for word in ("伊朗", "美国", "特朗普", "军舰", "雷达", "出口", "核电", "OpenAI", "ChatGPT", "凤凰网", "网易", "新华网")):
-            geopolitical_terms += 1
-
     title = infer_display_title(item)
-    title_is_headline = len(title) <= 42 and not title.endswith("？") and not title.endswith("吗")
+    title_is_headline = line_looks_like_headline(title) and not title.endswith(("？", "?", "吗"))
+    headline_like = sum(1 for line in lines[:12] if line_looks_like_headline(line))
+    source_style = sum(1 for line in lines[:12] if any(mark in clean_text(line) for mark in ("_", "|", "｜")))
+    enumerated = sum(1 for line in lines[:12] if LEADING_ENUM_RE.match(clean_text(line)))
+
     base_match = (
         source_style >= 2
-        or short_headlines >= 4
-        or (len(lines) >= 4 and short_headlines >= 3 and title_is_headline)
-        or (len(lines) >= 4 and geopolitical_terms >= 3)
+        or headline_like >= 4
+        or (len(lines) >= 4 and headline_like >= 3 and title_is_headline)
+        or enumerated >= 2
     )
     if not base_match:
         return False
 
     if item.get("is_question"):
-        return source_style >= 2 or (geopolitical_terms >= 4 and short_headlines >= 3)
+        return source_style >= 2 or enumerated >= 2
     return True
-
-
-def infer_news_theme(line: str) -> str:
-    text = clean_text(line)
-    mapping = [
-        ("平台内容治理", ["网盘", "影视剧", "盗版", "浏览器", "短剧", "分账"]),
-        ("AI与科技", ["OpenAI", "ChatGPT", "AI", "医生", "算力", "模型"]),
-        ("中东局势", ["伊朗", "霍尔木兹", "导弹", "军舰", "美军基地", "特朗普攻击伊朗"]),
-        ("能源与产业", ["核电", "反应堆", "藏红花", "股市", "出口"]),
-        ("外交人事", ["耿爽", "履新", "副会长", "联合国", "外交学会"]),
-        ("国际冲突", ["袭击", "轰炸", "绑架", "战争", "动武"]),
-        ("社会与劳动", ["就业", "劳动", "工人", "灵活就业", "平台用工"]),
-    ]
-    for theme, keywords in mapping:
-        if any(keyword in text for keyword in keywords):
-            return theme
-    if "|" in text or "_" in text:
-        return "外部新闻"
-    return ""
 
 
 def clean_news_line(line: str) -> str:
@@ -347,46 +329,42 @@ def split_sentences(text: str) -> List[str]:
 
 def is_intro_sentence(sentence: str) -> bool:
     sentence = clean_text(sentence)
-    intro_prefixes = (
-        "豆农你好",
-        "督工你好",
-        "陈司你好",
-        "我是睡前消息的老观众",
+    if not sentence:
+        return True
+    normalized = GENERIC_GREETING_PREFIX_RE.sub("", sentence)
+    intro_markers = (
         "第一次提问",
-        "突发奇想了一下",
-        "最近赶上我朋友喜当爹",
+        "第一次发言",
+        "第一次在这里",
+        "冒昧打扰",
+        "占用一点时间",
+        "简单介绍一下背景",
+        "先说一下背景",
+        "补充一下背景",
+        "我是老用户",
+        "我是老读者",
+        "我是老观众",
+        "潜水很久",
+        "关注很久",
+        "最近遇到一个问题",
+        "最近碰到一个问题",
+        "想请教一个问题",
+        "想咨询一个问题",
+        "突发奇想",
     )
-    return any(sentence.startswith(prefix) for prefix in intro_prefixes)
-
-
-def topic_label_for_question(text: str) -> str:
-    mapping = [
-        ("生育与自动化社会分工", ["生育师", "自动化", "基础产业链", "生育率", "AI必然会替代"]),
-        ("育儿与社会化抚养", ["育儿", "母乳", "奶粉", "抚养", "宝妈", "新生儿", "父亲", "月嫂", "育儿中心"]),
-        ("劳动法实践与劳动维权", ["劳动法", "劳动仲裁", "维权", "违法解除", "补偿标准", "律师"]),
-        ("金钱观与消费取舍", ["金钱观", "最值得的钱", "最后悔没花的钱", "收入尚有富余"]),
-    ]
-    for label, keywords in mapping:
-        if any(word in text for word in keywords):
-            return label
-    return ""
+    if any(normalized.startswith(marker) for marker in intro_markers):
+        return True
+    return len(normalized) <= 18 and sentence != normalized
 
 
 def rewrite_question_core(text: str) -> str:
     text = clean_text(text)
-    replacements = [
-        ("豆农有什么意见", "对此有哪些建议"),
-        ("也问问知识星球里的其他朋友，", ""),
-        ("有多大的可行性呢", "可行性有多高"),
-        ("碰到过哪些问题", "常见问题有哪些"),
-        ("补偿标准的计算亦或是违法解除的举证", "补偿计算和违法解除举证该怎么处理"),
-        ("这个时候了，", ""),
-        ("现在的初步想法是", "是否适合"),
-    ]
-    for old, new in replacements:
-        text = text.replace(old, new)
+    text = GENERIC_GREETING_PREFIX_RE.sub("", text)
     text = re.sub(r"[（(][^）)]{0,30}[）)]", "", text)
-    text = re.sub(r"想了解\s*想了解", "想了解", text)
+    text = re.sub(r"^(?:我想请教(?:一下)?|想请教(?:一下)?|请教(?:一下)?|想咨询(?:一下)?|咨询(?:一下)?|想问(?:一下)?|请问(?:一下)?|我想问(?:一下)?|也想问问大家|也想请教大家)[，,：:\s]*", "", text)
+    text = re.sub(r"^(?:先说一下背景|简单介绍一下背景|补充一下背景|背景是这样|情况是这样)[，,：:\s]*", "", text)
+    text = re.sub(r"^(?:现在的初步想法是|目前的想法是|我的想法是)[，,：:\s]*", "", text)
+    text = re.sub(r"(?:也问问(?:知识星球)?里的其他朋友|也欢迎大家讨论)[，,：:\s]*", "", text)
     text = re.sub(r"\s+", " ", text).strip("，。； ")
     return text
 
@@ -418,7 +396,6 @@ def summarize_question_item(item: dict, max_chars: int) -> str:
     text = re.sub(r"\s+", " ", " ".join(lines)).strip()
     sentences = [s for s in split_sentences(text) if not is_intro_sentence(s)]
     question_sentences = [s for s in sentences if any(hint in s for hint in QUESTION_HINTS)]
-    label = topic_label_for_question(text)
 
     chosen = []
     source_sentences = question_sentences or sentences
@@ -430,15 +407,12 @@ def summarize_question_item(item: dict, max_chars: int) -> str:
         if len(chosen) >= 2:
             break
 
-    if chosen and (label or len(chosen[0]) >= 42):
-        core = chosen[0]
-    else:
-        core = " ".join(chosen).strip() if chosen else rewrite_question_core(text)
+    summary = chosen[0] if chosen else rewrite_question_core(text)
+    if chosen and len(summary) < min(48, max_chars // 2) and len(chosen) > 1:
+        combined = f"{summary} {chosen[1]}".strip()
+        if len(combined) <= max_chars:
+            summary = combined
 
-    if label:
-        summary = f"围绕{label}提问，想了解{core}"
-    else:
-        summary = core
     summary = summary.replace("？？", "？").replace("。。", "。")
     return compact_sentence(summary, max_chars)
 
@@ -521,8 +495,9 @@ def main():
             compact_items = compact_items[: args.compact_max_items]
 
         out.append(f"## {circle_name}")
+        circle_private_mode = should_use_private_news_list_mode(circle_name, requested=args.private_news_list_mode)
         date_span = circle_date_span(circle_items)
-        authors = circle_authors(circle_items, private_mode=args.private_news_list_mode)
+        authors = circle_authors(circle_items, private_mode=circle_private_mode)
         if date_span:
             out.append(f"- 摘要时间跨度：{date_span}")
         if authors:
@@ -534,7 +509,7 @@ def main():
             for idx, item in enumerate(full_items, start=1):
                 title = infer_display_title(item)
                 out.append(f"#### {idx}. {title}")
-                summary = summarize_text(item, max_chars=args.full_max_chars, private_news_list_mode=args.private_news_list_mode)
+                summary = summarize_text(item, max_chars=args.full_max_chars, private_news_list_mode=circle_private_mode)
                 append_summary(out, summary)
                 url = clean_text(item.get("url"))
                 if url:
@@ -544,7 +519,7 @@ def main():
         if compact_items:
             out.append("### 其余更新")
             for item in compact_items:
-                summary = summarize_text(item, max_chars=args.compact_max_chars, private_news_list_mode=args.private_news_list_mode)
+                summary = summarize_text(item, max_chars=args.compact_max_chars, private_news_list_mode=circle_private_mode)
                 append_summary(out, summary)
                 url = clean_text(item.get("url"))
                 if url:
