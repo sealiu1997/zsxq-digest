@@ -87,6 +87,11 @@ Choose the least risky workable mode in this order:
    - Keep visible metadata light.
    - Prefer showing only useful reader-facing context such as `摘要时间跨度` and `作者` when available.
    - For normal discussion / Q&A items, prefer one concise sentence that says what the item is about.
+   - Default summarization should stay structure-first and conservative:
+     - use formatting / line structure / list signals before any domain-specific assumptions
+     - avoid hardcoding company names, countries, or circle-specific vocabulary into the public summary path
+     - keep cleanup rules minimal; remove only the most obvious greeting / setup noise, and prefer leaving a little fluff over accidentally deleting substance
+     - if a post is already a compressed news / link bundle, public mode may still summarize it generically unless the user explicitly enables a local/private enhancement mode
    - Do not force visible fields like “why it matters” unless the user asks for a stronger editorial mode.
 
 ## Delivery modes
@@ -162,6 +167,14 @@ Rules:
 - Avoid noisy technical headers in the default user-facing output.
 - Prefer concise, readable summaries over operational metadata.
 - For grouped news/link-list posts, keep the public default conservative; circle-specific custom handling should stay optional/local.
+- When tuning output, keep responsibility boundaries clear:
+  - change `scripts/render_stream_digest.py` for layout, summary cleanup, title recovery, and news-list heuristics
+  - change `scripts/enrich_stream_items.py` for scoring, full/compact selection, and excerpt sizing
+  - keep `scripts/run_stream_pipeline.py` as orchestration glue only; pass flags through it instead of re-implementing render logic there
+  - avoid pushing editorial or circle-specific summary behavior down into collectors unless the input schema truly needs a new field
+- Prefer adding new summary behavior as small helper functions used by `summarize_text()` / related render helpers, instead of scattering special cases across the pipeline.
+- Keep new public behavior structure-first and conservative; place circle-specific or stronger editorial tuning behind explicit default-off local flags.
+- When iterating on layout or summary tuning, prefer local fixture replay over repeatedly calling the live API; save a representative JSON sample first, then rerun `enrich` / `render` locally.
 
 If reliable extraction is incomplete, explicitly mark missing scope instead of guessing.
 

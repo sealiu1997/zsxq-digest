@@ -237,6 +237,111 @@ python3 scripts/render_stream_digest.py \
   /tmp/zsxq-stream.json
 ```
 
+### 7.1 如何调整排版与摘要清洗 / How to tune layout and summary cleaning
+
+如果你想调整 stream digest 的**排版、标题推断、摘要清洗、新闻串启发式**，优先改这里：
+- `scripts/render_stream_digest.py`
+
+If you want to tune the stream digest's **layout, title inference, summary cleanup, or news-list heuristics**, start here:
+- `scripts/render_stream_digest.py`
+
+建议按职责拆分理解：
+- `scripts/collect_from_session.py` / `scripts/collect_from_browser.py`
+  - 负责**采集与标准化输入**
+  - 不适合塞入文案风格、摘要句式或圈子特化排版逻辑
+- `scripts/enrich_stream_items.py`
+  - 负责**排序、打分、full/compact 分层、excerpt 截断**
+  - 适合调“哪些帖子应该展开、每圈展开几个、摘要输入最多保留多长”
+- `scripts/render_stream_digest.py`
+  - 负责**最终用户可见输出**
+  - 适合调标题恢复、摘要清洗、列表识别、markdown 布局、元数据显示与否
+- `scripts/run_stream_pipeline.py`
+  - 负责**串联 collect → dedupe → enrich → render**
+  - 只应该透传参数和维护文件交接，不应该复制摘要规则本身
+
+Think of the pipeline by responsibility:
+- `scripts/collect_from_session.py` / `scripts/collect_from_browser.py`
+  - own **collection and input normalization**
+  - not the right place for editorial style, summary phrasing, or circle-specific layout rules
+- `scripts/enrich_stream_items.py`
+  - owns **ranking, scoring, full/compact selection, and excerpt truncation**
+  - good for tuning which items expand, how many full items to keep, and how much text to preserve before rendering
+- `scripts/render_stream_digest.py`
+  - owns the **final user-visible output**
+  - good for title recovery, summary cleanup, list detection, markdown layout, and visible metadata choices
+- `scripts/run_stream_pipeline.py`
+  - owns **collect → dedupe → enrich → render orchestration**
+  - should only thread parameters and file handoff, not duplicate summary logic
+
+#### 推荐修改点 / Recommended edit points
+
+在 `render_stream_digest.py` 里，通常按下面的粒度改会比较稳：
+- `infer_display_title()`：调标题恢复策略
+- `candidate_content_lines()`：决定摘要候选正文从哪些行取
+- `normalize_summary_source()`：做保守的摘要清洗
+- `looks_like_news_list()`：判断一条帖子是否像“新闻串 / 链接串”
+- `summarize_text()`：决定普通条目怎么生成一句话摘要
+- `append_summary()`：决定多行摘要如何落到 markdown
+
+Inside `render_stream_digest.py`, these are usually the safest extension points:
+- `infer_display_title()` for title recovery
+- `candidate_content_lines()` for selecting candidate body lines
+- `normalize_summary_source()` for conservative summary cleanup
+- `looks_like_news_list()` for detecting grouped news / link-list posts
+- `summarize_text()` for one-line summary generation on normal posts
+- `append_summary()` for how multiline summaries render into markdown
+
+#### 低耦合最佳实践 / Low-coupling best practices
+
+1. **先分清“输入裁剪”还是“输出表达”**
+   - 如果你想控制输入长度、展开条数、full/compact 边界，优先改 `enrich_stream_items.py`
+   - 如果你想让输出更像人写的摘要，优先改 `render_stream_digest.py`
+
+2. **让 render 只消费既有字段，不反向污染 collect**
+   - 尽量基于现有字段工作，例如：
+     - `title_or_hook`
+     - `detail_excerpt`
+     - `detail_excerpt_raw`
+     - `content_preview`
+     - `stream_score`
+     - `summary_mode`
+   - 不要为了一个摘要句式，反过来修改 collector 的输出 schema
+
+3. **新增规则优先写成 helper，而不是散落在主流程里**
+   - 比如新增“短行列表识别”，优先加一个独立 helper，再由 `summarize_text()` 调用
+   - 这样更容易做 public/private 分支，也更容易回滚
+
+4. **public 默认逻辑保持 default-on 的保守规则；定制增强走 default-off 开关**
+   - 通用结构化启发式可以进默认逻辑
+   - 圈子特化、语料特化、强观点式摘要，优先挂到显式 flag（如 `--private-news-list-mode`）
+
+5. **不要在多个脚本里重复实现同一种摘要清洗**
+   - 清洗规则最好收敛在 `render_stream_digest.py`
+   - `run_stream_pipeline.py` 只负责把 flag 传进去
+
+6. **保持 CLI 接口后向兼容**
+   - 如果新增渲染参数，先加到 `render_stream_digest.py`
+   - 再按需在 `run_stream_pipeline.py` 透传
+   - 默认值要保证旧命令不需要改也能继续跑
+
+7. **先用临时 cursor / 临时输出文件回放验证，再动正式 state**
+   - 推荐用 `/tmp/...` 跑一遍完整流程看实际摘要效果
+   - 避免为了调排版污染生产 cursor 或正式 digest 产物
+
+8. **调排版时，尽量离线回放，不要反复请求线上 API / When tuning layout, prefer offline replay instead of repeatedly hitting the live API**
+   - 最稳的做法是先采一份包含目标案例的本地 fixture（如 `test_fixture.json` / `stream_enriched.json`）
+   - 后续优先反复执行 `enrich_stream_items.py` / `render_stream_digest.py` 做本地回放
+   - 只有确认规则成立后，再跑完整 pipeline，避免高频重复请求触发平台风控
+   - The safest workflow is to save a local fixture first (for example `test_fixture.json` or `stream_enriched.json`)
+   - Then iterate locally with `enrich_stream_items.py` / `render_stream_digest.py`
+   - Only rerun the full pipeline after the rule is validated, to reduce the risk of rate limits or account bans
+
+#### 一个实用判断法 / A practical rule of thumb
+
+- 想改“**看到什么**” → 先看 `collect_*` 和 `enrich_stream_items.py`
+- 想改“**怎么展示**” → 先看 `render_stream_digest.py`
+- 想改“**命令怎么串起来**” → 看 `run_stream_pipeline.py`
+
 ### 8. 一条命令跑旧版流水线 / Run the full legacy pipeline in one command
 
 ```bash
@@ -477,6 +582,22 @@ The public / reusable default stays conservative:
 - minimal visible metadata
 - one-sentence summaries for normal discussion / Q&A posts
 - no circle-specific editorial logic baked into the public contract
+
+#### 摘要调整原则 / Summary-tuning rules
+
+这条边界对 public 版很重要：
+- 默认摘要优先依据**文本结构**判断（短行、编号、列表感、分隔符），而不是硬编码特定公司名、国家名或圈子黑话
+- 默认清洗策略要**克制**：只移除最常见、最确定的寒暄 / 铺垫噪声；宁可保留一点废话，也不要因为激进正则误删正文
+- 对普通讨论 / 提问，优先输出“一句话说清这条在讲什么”
+- 如果原帖本身已经是压缩好的新闻串 / 链接串，public 默认模式仍然允许做**泛化摘要**；只有显式打开本地私有增强时，才倾向直接保留清洗后的原始线索
+- `--private-news-list-mode` 是 **default-off** 的本地增强开关，不属于 public 默认 contract
+
+This boundary matters for the public version:
+- default summarization should rely on **text structure** first (short lines, numbering, list patterns, separators), not hardcoded company names, countries, or circle-specific jargon
+- cleanup rules should stay **conservative**: remove only the most obvious greeting / setup noise; it is better to leave a little fluff than to over-trim real content with aggressive regexes
+- for normal discussion / Q&A posts, prefer a one-sentence summary that simply says what the item is about
+- if a post is already a compressed news / link bundle, the public default may still use a **generic summary**; only an explicit local/private enhancement should switch to preserving cleaned raw cues directly
+- `--private-news-list-mode` is a **default-off** local enhancement flag, not part of the default public contract
 
 ### Private enhancement
 
