@@ -19,7 +19,6 @@ TRAILING_SOURCE_TAIL_RE = re.compile(r"(?:[_|｜][^_|｜\s]{1,12}){2,}$")
 TRAILING_SOURCE_NAME_RE = re.compile(r"[-_｜|](新华网|凤凰网|新浪新闻|网易新闻|网易|腾讯新闻|财新网|观察者网|澎湃新闻)$")
 TRAILING_ELLIPSIS_RE = re.compile(r"(\.\.\.|…|……)+$")
 SOURCE_NOISE = {"百度安全验证", "华尔街见闻", "本球消息"}
-QUESTION_HINTS = ("？", "?", "是否", "能否", "可行性", "怎么", "如何", "有没有", "意见", "建议", "问题", "请教")
 TITLE_AS_NEWS_LINE_RE = re.compile(r"^(?:旧闻\s*)?\d+(?:[\.、]|\s)")
 GENERIC_GREETING_PREFIX_RE = re.compile(r"^(?:(?:[\u4e00-\u9fffA-Za-z0-9_·]{1,12})(?:你好|您好|老师好)|你好|您好|各位好|老师好|博主好|作者好|大家好|hi|hello)[，,！!：:\s]*", re.IGNORECASE)
 
@@ -327,113 +326,28 @@ def split_sentences(text: str) -> List[str]:
     return [part.strip() for part in re.split(r"(?<=[。！？；])\s*", text) if part.strip()]
 
 
-def is_intro_sentence(sentence: str) -> bool:
-    sentence = clean_text(sentence)
-    if not sentence:
-        return True
-    normalized = GENERIC_GREETING_PREFIX_RE.sub("", sentence)
-    intro_markers = (
-        "第一次提问",
-        "第一次发言",
-        "第一次在这里",
-        "冒昧打扰",
-        "占用一点时间",
-        "简单介绍一下背景",
-        "先说一下背景",
-        "补充一下背景",
-        "我是老用户",
-        "我是老读者",
-        "我是老观众",
-        "潜水很久",
-        "关注很久",
-        "最近遇到一个问题",
-        "最近碰到一个问题",
-        "想请教一个问题",
-        "想咨询一个问题",
-        "突发奇想",
-    )
-    if any(normalized.startswith(marker) for marker in intro_markers):
-        return True
-    return len(normalized) <= 18 and sentence != normalized
-
-
-def rewrite_question_core(text: str) -> str:
+def normalize_summary_source(text: str) -> str:
     text = clean_text(text)
     text = GENERIC_GREETING_PREFIX_RE.sub("", text)
     text = re.sub(r"[（(][^）)]{0,30}[）)]", "", text)
-    text = re.sub(r"^(?:我想请教(?:一下)?|想请教(?:一下)?|请教(?:一下)?|想咨询(?:一下)?|咨询(?:一下)?|想问(?:一下)?|请问(?:一下)?|我想问(?:一下)?|也想问问大家|也想请教大家)[，,：:\s]*", "", text)
-    text = re.sub(r"^(?:先说一下背景|简单介绍一下背景|补充一下背景|背景是这样|情况是这样)[，,：:\s]*", "", text)
-    text = re.sub(r"^(?:现在的初步想法是|目前的想法是|我的想法是)[，,：:\s]*", "", text)
-    text = re.sub(r"(?:也问问(?:知识星球)?里的其他朋友|也欢迎大家讨论)[，,：:\s]*", "", text)
+    text = re.sub(r"^(?:我想请教(?:一下)?|想请教(?:一下)?|请教(?:一下)?|想咨询(?:一下)?|咨询(?:一下)?|想问(?:一下)?|请问(?:一下)?|我想问(?:一下)?)[，,：:\s]*", "", text)
+    text = re.sub(r"^(?:先说一下背景|简单介绍一下背景|补充一下背景|背景是这样|情况是这样|我的情况是这样|事情是这样的)[，,：:\s]*", "", text)
+    text = re.sub(r"^(?:现在的初步想法是|目前的想法是|我的想法是|我现在的想法是)[，,：:\s]*", "", text)
+    text = re.sub(r"(?:也问问(?:知识星球)?里的其他朋友|也欢迎大家讨论|欢迎大家讨论|供大家参考)[，,：:\s]*", "", text)
     text = re.sub(r"\s+", " ", text).strip("，。； ")
     return text
-
-
-def is_operational_notice(text: str) -> bool:
-    text = clean_text(text)
-    notice_markers = ("后台提问", "提问时间线", "筛选", "清理", "敬请谅解", "忽略掉", "忽略", "不会浪费")
-    strong_question_hints = ("？", "?", "请教", "能否", "如何", "怎么", "有没有", "可行性")
-    return any(marker in text for marker in notice_markers) and not any(hint in text for hint in strong_question_hints)
-
-
-def summarize_operational_notice(item: dict, max_chars: int) -> str:
-    text = re.sub(r"\s+", " ", " ".join(candidate_content_lines(item))).strip()
-    pieces = []
-    if any(marker in text for marker in ("不会浪费", "筛选", "清理")):
-        pieces.append("说明后台提问会按价值逐步筛选清理")
-    if any(marker in text for marker in ("忽略", "敬请谅解")):
-        pieces.append("近期部分问题会暂时忽略")
-    if not pieces:
-        pieces.append("这是一条后台处理说明")
-    summary = "，".join(pieces)
-    if not summary.endswith("。"):
-        summary += "。"
-    return compact_sentence(summary, max_chars)
-
-
-def summarize_question_item(item: dict, max_chars: int) -> str:
-    lines = candidate_content_lines(item)
-    text = re.sub(r"\s+", " ", " ".join(lines)).strip()
-    sentences = [s for s in split_sentences(text) if not is_intro_sentence(s)]
-    question_sentences = [s for s in sentences if any(hint in s for hint in QUESTION_HINTS)]
-
-    chosen = []
-    source_sentences = question_sentences or sentences
-    for sentence in source_sentences:
-        sentence = rewrite_question_core(sentence)
-        if not sentence:
-            continue
-        chosen.append(sentence)
-        if len(chosen) >= 2:
-            break
-
-    summary = chosen[0] if chosen else rewrite_question_core(text)
-    if chosen and len(summary) < min(48, max_chars // 2) and len(chosen) > 1:
-        combined = f"{summary} {chosen[1]}".strip()
-        if len(combined) <= max_chars:
-            summary = combined
-
-    summary = summary.replace("？？", "？").replace("。。", "。")
-    return compact_sentence(summary, max_chars)
 
 
 def summarize_text(item: dict, max_chars: int, private_news_list_mode: bool = False) -> str:
     if private_news_list_mode and looks_like_news_list(item):
         return summarize_private_news_list(item, max_chars)
 
-    base_text = " ".join(candidate_content_lines(item))
-    if is_operational_notice(base_text):
-        return summarize_operational_notice(item, max_chars)
-
-    if item.get("is_question") and item.get("summary_mode") != "full":
-        return summarize_question_item(item, max_chars)
-
-    text = base_text
-    text = re.sub(r"\s+", " ", text).strip()
+    text = normalize_summary_source(" ".join(candidate_content_lines(item)))
     if not text:
         text = infer_display_title(item)
 
-    sentence_parts = split_sentences(text)
+    sentence_parts = [normalize_summary_source(part) for part in split_sentences(text)]
+    sentence_parts = [part for part in sentence_parts if part]
     if sentence_parts:
         summary = sentence_parts[0]
         idx = 1
